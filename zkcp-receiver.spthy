@@ -1,0 +1,254 @@
+//TIME: 1min58sec (security + reachability)
+
+theory ZKCP_Receiver
+
+begin 
+builtins: symmetric-encryption,xor,hashing, multiset,diffie-hellman
+
+functions: 
+  ok/0, f/1, i/1,g/0,
+  verify/3,sign/3, pk/1, check/2,
+  get/1, zk_prove/4, zk_verify/4,
+
+  // FOR EXPOPNENT AND PUBLIC KEY VERIFICATION 
+  fr/1[private], verify_exp/1, verify_key/1
+  
+equations:
+  // ADDITIONAL CRYPTOGRAPHIC PRIMITIVES
+  verify(sign(x,y,z),x,pk(y))=ok,
+  get(sign(x,y,z)) = x,
+    // EQUATION BELOW NOT ACCEPTED IN NEWER VERSIONS OF TAMARIN - WE ENCODE ZK VERIFICATION IN A RULE BELOW
+  zk_verify( zk_prove(senc(x,h(y)), g^y, x, y), f(x), senc(x,h(y)), g^y) = ok,
+  
+  // EXPONENT AND PUBLIC KEY VERIFICATION
+// EQUATION BELOW NOT ACCEPTED IN NEWER VERSIONS OF TAMARIN - WE ENCODE VERIFICATION IN A RULE BELOW
+//  verify_exp(g^fr(x)) = ok,
+  verify_key(pk(fr(x))) = ok,
+  
+  // COMPLETING XOR 
+  i(x) = x 
+
+
+
+rule ZK_Verify: // WE PATTERN MATCH THE ARGUMENTS OF THE LEFT-HAND SIDE OF THE EQUATION
+  [ In(<zk_prove(senc(x,h(y)), g^y, x, y), f(x), senc(x,h(y)), g^y>) ]
+  --[]->
+  // IF THE TERMS MATCH THE PATTERN, THE ZK PROOF IS VERIFIED
+  [ Verified(zk_prove(senc(x,h(y)), g^y, x, y), f(x), senc(x,h(y)), g^y) ]
+  
+  rule EXP_Verify:
+      [ In(g^fr(x))  ]
+    --[  ]->
+      [ Verified_exp(g^fr(x)) ]
+
+// KEY INFRASTRUCTURE
+rule RegisterHonestKey:
+    [ Fr(~sk) ]--[ !Sk(~sk), Honest(pk(~sk)) ]->[ !Sk(~sk), !Pk(pk(~sk)), Out( pk(~sk) ) ]
+
+rule RegisterCorruptKey: 
+    [ In(sk) ]--[ Corrupt(pk(sk)) ]->[ !Pk(pk(sk)) ]
+
+// ZKCP FUNCTION
+rule Function_WitnessSeller: 
+  [ Fr(~wtn) ]--[ !Witn(~wtn) ]->[ !Witn(~wtn), Out(f(~wtn)) ]
+
+rule Function_ResultBuyer: 
+  [In( wtn )]--[ Once(wtn) ]->[ !Stm(f(wtn)) ]
+
+rule FreshR: 
+  [ Fr(~r) ]--[ Nonce(fr(~r)) ]->[Out(fr(~r)) ] 
+
+/* ------ LEDGER INFRASTRUCTURE ---- */ 
+
+/* ------ LEDGER RULES ---- */ 
+rule Mine: 
+  let sn = $rr in 
+  [ !Pk(x) ]--[ !Coin(sn,x,'notime'), Once(<'coin',sn>) ]-> [ !Coin(sn,x,'notime'), Out(sn) ] 
+
+rule Coin_To_Coin:
+    let trans = <sn,x1,lab1> 
+        sn1 = $rr in 
+    [ !Coin(sn,x,lab), In(<trans, sig>) ] 
+    --[ Eq(verify(sig, trans, x), ok), !Spend(sn,sig,x1), !Coin(sn1,x1,lab1), 
+        Once(<'spend', sn>), Once(<'coin', sn1>)
+       ]->  
+    [ !Coin(sn1,x1,lab1), !Trans(sn,x,sig,sn1, x1) ]
+
+rule Time_Unlock:
+    let sn1 = $rr in 
+    [ !Coin(sn,x,'time'), !Trans(sn0,y,lab,sn,x) ]
+  --[ !Spend(sn,'time', y), !Coin(sn1,y,'notime'), 
+      Once(<'spend', sn>), Once(<'coin', sn1>) ]->  
+    [ !Coin(sn1,y,'notime'), !Trans(sn,x,'time',sn1, y) ]
+
+/* ------ UNIQUENESS RESTRICTION (IN PARTICULAR FOR LEDGER) ---- */ 
+
+restriction Once: 
+  " All x #i #j. Once(x) @ i & Once(x) @ j ==> #i=#j "
+
+
+// ADAPTOR SIGNATURES
+rule AS_Setup:
+    let pk1 = pk(sk1) pk2 = pk(sk2) 
+        pk12 = pk(~sk12) in 
+    [ Fr(~sk12), !Sk(sk1), In(sk2) ]
+    --[ SharedKey(~sk12), Honest(pk12) ]->
+    [ !SharedSk(pk1 + pk2,~sk12),
+      !SharedPk(pk1 + pk2,pk12),
+      Out(pk12), !Pk(pk12) ]
+
+rule AS_Sign:
+  let 
+    pkSR = pk(sk)
+    Y = g^y 
+    s = sign(mess, sk, ~r) 
+    pre_signature = s XOR y in 
+  [ !SharedSk(pkS + pkR, sk), AS_Sender_Input(pkS, pkSR, mess, y), 
+    AS_Receiver_Input(pkR, pkSR, mess, Y), Fr(~r) ] 
+  --[Signed(mess,sk,~r)]-> 
+  [ AS_Receiver_Output(pkR, pkSR, mess, Y, pre_signature) ] 
+
+
+rule AS_Adversary_Sender_Input: 
+[ In(<skS, pkSR, mess, y>) ] --[ Corrupt(pk(skS)) ]-> [ AS_Sender_Input(pk(skS), pkSR, mess, y) ] 
+
+rule AS_Adversary_Receiver_Input: 
+[ In(<skR,pkSR, mess, Y >) ] --[ Corrupt(pk(skR)) ]-> [ AS_Receiver_Input(pk(skR), pkSR, mess, Y) ]
+
+rule AS_Adversary_Receiver_Output: 
+[ AS_Receiver_Output(pk(skR), pkSR, mess, Y, pre_signature), In(skR) ] --[ Corrupt(pk(skR)) ]-> [ Out(pre_signature) ]
+
+
+lemma Unforgeability:
+"
+    All k m r #i #j. SharedKey(k) @ i & KU(sign(m,k,r)) @ j ==> Ex #l. Signed(m,k,r) @ l
+"
+
+// RECEIVER
+rule Setup:
+  let trans0 = <sn0, pkSR,'time'>
+      sig0 = sign( trans0, skR, ~r )
+  in
+    [ !Sk(skR), !Pk(pkS), !Stm(stm), In(<c,rho,pi>), In(sn0), In(pr), 
+      !Coin(sn0,pk(skR),lab), 
+      !SharedPk(pk(skR) + pkS,pkSR), Fr(~r), Verified(pi,stm,c,rho), Verified_exp(rho) ]
+  --[ //Eq(zk_verify(pi, stm, c,rho),ok), //REPLACED WITH VERIFIED FACTS
+      //Eq(verify_exp(rho), ok), 
+      Eq(verify_key(pkS),ok) ]->
+    [ Out(<trans0,sig0>), State0( skR, pkS ,pkSR, stm, c, rho, trans0, sn0, sig0) ]
+
+rule Exchange_1:
+  let trans = <sn,pkS,'notime'>
+  in
+  [ State0( skR, pkS, pkSR, stm, c, rho, trans0, sn0, sig0), !Trans(sn0,pk(skR), sig0, sn, pkSR), 
+    !Coin(sn,pkSR,'time') // RUNS FASTER WITH THIS LINE 
+    ]
+--[ Pay( pk(skR), stm, sn), PayC( pk(skR), rho, sn) ]->
+  [ AS_Receiver_Input(pk(skR), pkSR, trans, rho), State1(skR, pkS , pkSR, stm, c, rho,  sn, trans) ]
+
+rule Exchange_2:
+  [ State1(skR, pkS , pkSR, stm, c, rho, sn, trans), AS_Receiver_Output(pk(skR), pkSR, trans, rho, masked_signature) ]
+  --> 
+  [ Out(masked_signature), State2(skR, pkS , pkSR, stm, c, rho, sn, masked_signature) ]
+
+
+rule Settle: 
+  let beta = masked_signature XOR i(s) 
+      k = h(beta)
+      wtn = sdec(c,k) 
+   in 
+  [ State2(skR, pkS , pkSR, stm, c, rho, sn, masked_signature), !Trans(sn,pkSR, s, sn1, pkX) ] 
+--[ End(pk(skR), sn, wtn), EndC(pk(skR), sn, masked_signature) ]-> [ ]
+
+
+// SECURITY LEMMA
+lemma Receiver_Security:
+  "
+  All pkR wtn stm sn pkX s #j #i #l.
+        Pay(pkR, stm, sn) @ i & !Spend(sn, s, pkX) @ j & End(pkR, sn, wtn) @ l ==> (stm=f(wtn) ) | ( pkR = pkX ) 
+                        "
+
+
+// WE WANT THE FOLLOWING LEMMA, BUT TAMARIN DOES NOT ALLOW DIRECT USE OF ^ AND XOR IN LEMMAS. 
+// INSTEAD, WE ENCODE THE CORRESPONDING RELATIONS THROUGH THE RULES XORED AND EXP GIVEN BELOW
+
+/* lemma Receiver_Security_xor_free:
+  "
+  All pkR rho beta sn pkX pkSR lab s beta1 sn1 y #j #i #l.
+        PayC(pkR, g^beta, sn) @ i & 
+        !Spend(sn,pkSR,lab, s, sn1, pkX) @ j & 
+        EndC(pkR, sn, masked_signature) @ l &  
+        ==> (masked_signature = s XOR beta ) | ( not Ex #q. Corrupt(pkX) @q ) 
+  "
+  */ 
+
+
+rule XORED:
+    [ In(x), In(y) ]
+  --[ XORED(x,y,x XOR y) ]->
+    [  ]
+
+rule EXP:
+    [ In(x), In(y) ]
+  --[ EXP(x,y,x^y) ]->
+    [  ]
+
+lemma Receiver_Security_xor_free_corrupt:
+  "
+  All pkR rho beta sn pkX  s masked_signature y #j #i #ii #l #q #k.
+        PayC(pkR, rho, sn) @ i & 
+        EXP(g, beta, rho) @ ii & 
+        !Spend(sn, s, pkX) @ j & 
+        Corrupt(pkX) @q &
+        EndC(pkR, sn, masked_signature) @ l &  
+        XORED(s,beta,y) @ k 
+        ==> masked_signature = y  
+  "
+
+lemma Receiver_Security_xor_free_honest:
+  "
+  All pkR rho beta sn pkX s masked_signature y #j #i #q #ii #l #k.
+        PayC(pkR, rho, sn) @ i & 
+        EXP(g, beta, rho) @ ii & 
+        !Spend(sn, s, pkX) @ j & 
+        Honest(pkX) @ q &
+        EndC(pkR, sn, masked_signature) @ l & 
+        XORED(s,beta,y) @ k 
+        ==> masked_signature = y  | pkR = pkX 
+  "
+
+
+// REACHABILITY LEMMAS (TO CHECK THAT THE CODE IS RUNNING AS EXPECTED)
+
+lemma Receiver_Reachability_1:
+  exists-trace
+  " 
+  Ex skR res sn wtn #j #i.
+        Pay(pk(skR), res, sn) @ i & End(pk(skR), sn, wtn) @ j "
+
+lemma Receiver_Reachability_2:
+  exists-trace
+  " 
+  Ex skR res sn wtn x1 x2 #j #i #l.
+        Pay(pk(skR), res, sn) @ i & End(pk(skR), sn, wtn) @ j & 
+        !Spend(sn, x1, x2) @ l "
+
+lemma Receiver_Reachability_3:
+  exists-trace
+  " 
+  Ex skR res sn outcome x1 x2 #j #i #l.
+        Pay(pk(skR), res, sn) @ i & End(pk(skR), sn, outcome) @ j & 
+        !Spend(sn, x1, x2) @ l & not x2 = pk(skR)
+         "
+
+// HELPFUL LEMMA FOR TERMINATION 
+lemma SecretKey[sources]:
+" All x #i. !Sk(x) @ i ==> not Ex #l. KU(x) @ l " 
+
+
+// EQUALITY CHECKS
+restriction Equalities:
+  " (All x y #i. Eq(x,y) @ i ==> x = y ) "
+
+
+end

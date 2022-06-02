@@ -1,0 +1,187 @@
+
+//TIME: 2min20sec (security + reachability)
+      
+
+theory ZKCP_Sender
+
+begin 
+builtins: symmetric-encryption,xor,hashing, multiset, diffie-hellman
+
+functions: 
+  ok/0, f/1, i/1, g/0,
+   verify/3,sign/3, pk/1,
+  get/1, zk_prove/4, zk_verify/4 
+  
+equations:
+  // ADDITIONAL CRYPTOGRAPHIC PRIMITIVES
+  verify(sign(x,y,z),x,pk(y))=ok,
+  get(sign(x,y,z)) = x,
+  // EQUATION BELOW NOT ACCEPTED IN NEWER VERSIONS OF TAMARIN - WE ENCODE ZK VERIFICATION IN A RULE BELOW
+ // zk_verify( zk_prove(senc(x,h(y)), g^y, x, y), f(x), senc(x,h(y)), g^y) = ok, 
+  // COMPLETING XOR 
+  i(x) = x
+
+rule ZK_Verify: // WE PATTERN MATCH THE ARGUMENTS OF THE LEFT-HAND SIDE OF THE EQUATION
+  [ In(<zk_prove(senc(x,h(y)), g^y, x, y), f(x), senc(x,h(y)), g^y>) ]
+  --[]->
+  // IF THE TERMS MATCH THE PATTERN, THE ZK PROOF IS VERIFIED
+  [ Verified(zk_prove(senc(x,h(y)), g^y, x, y), f(x), senc(x,h(y)), g^y) ]
+
+// KEY INFRASTRUCTURE
+rule RegisterHonestKey:
+    [ Fr(~sk) ]--[ !Sk(~sk), Honest(pk(~sk)) ]->[ !Sk(~sk), !Pk(pk(~sk)), Out( pk(~sk) ) ]
+
+rule RegisterCorruptKey: 
+    [ In(sk) ]--[ Corrupt(pk(sk)) ]->[ !Pk(pk(sk)) ]
+
+restriction HonestNotCorrupt: 
+" All x #i. Honest(x) @ i ==> not Ex #j. Corrupt(x) @j "
+
+// ZKCP FUNCTION
+rule Function_WitnessSeller: 
+  [ Fr(~wtn) ]--[ !Witn(~wtn) ]->[ !Witn(~wtn), Out(f(~wtn)) ]
+
+rule Function_ResultBuyer: 
+  [In( wtn )]--[ Once(wtn) ]->[ !Stm(f(wtn)) ]
+
+/* ------ LEDGER INFRASTRUCTURE ---- */ 
+
+/* ------ LEDGER RULES ---- */ 
+rule Mine: 
+  let sn = $rr in 
+  [ !Pk(x) ]--[ !Coin(sn,x,'notime'), Once(<'coin',sn>) ]-> [ !Coin(sn,x,'notime'), Out(sn) ] 
+
+rule Coin_To_Coin:
+    let trans = <sn,x1,lab1> 
+        sn1 = $rr in 
+    [ !Coin(sn,x,lab), In(<trans, sig>) ] 
+    --[ Eq(verify(sig, trans, x), ok), !Spend(sn,sig,x1), !Coin(sn1,x1,lab1), 
+        Once(<'spend', sn>), Once(<'coin', sn1>)
+       ]->  
+    [ !Coin(sn1,x1,lab1), !Trans(sn,x,sig,sn1, x1) ]
+
+rule Time_Unlock:
+    let sn1 = $rr in 
+    [ !Coin(sn,x,'time'), !Trans(sn0,y,lab,sn,x) ]
+  --[ !Spend(sn,'time', y), !Coin(sn1,y,'notime'), 
+      Once(<'spend', sn>), Once(<'coin', sn1>) ]->  
+    [ !Coin(sn1,y,'notime'), !Trans(sn,x,'time',sn1, y) ]
+
+
+/* ------ UNIQUENESS RESTRICTION (IN PARTICULAR FOR LEDGER) ---- */ 
+
+restriction Once: 
+  " All x #i #j. Once(x) @ i & Once(x) @ j ==> #i=#j "
+
+
+// ADAPTOR SIGNATURES
+rule AS_Setup:
+    let pk1 = pk(sk1) pk2 = pk(sk2) 
+        pk12 = pk(~sk12) in 
+    [ Fr(~sk12), !Sk(sk1), In(sk2) ]
+    --[ SharedKey(~sk12), Honest(pk12) ]->
+    [ !SharedSk(pk1 + pk2,~sk12),
+      !SharedPk(pk1 + pk2,pk12),
+      Out(pk12), !Pk(pk12) ]
+rule AS_Sign:
+  let 
+    pkSR = pk(sk)
+    Y = g^y 
+    s = sign(mess, sk, ~r) 
+    pre_signature = s XOR y in 
+  [ !SharedSk(pkS + pkR, sk), AS_Sender_Input(pkS, pkSR, mess, y), 
+    AS_Receiver_Input(pkR, pkSR, mess, Y), Fr(~r) ] 
+  --[Signed(mess,sk,~r)]-> 
+  [ AS_Receiver_Output(pkR, pkSR, mess, Y, pre_signature) ] 
+
+
+rule AS_Adversary_Sender_Input: 
+[ In(<skS, pkSR, mess, y>) ] --[ Corrupt(pk(skS)) ]-> [ AS_Sender_Input(pk(skS), pkSR, mess, y) ] 
+
+rule AS_Adversary_Receiver_Input: 
+[ In(<skR,pkSR, mess, Y >) ] --[ Corrupt(pk(skR)) ]-> [ AS_Receiver_Input(pk(skR), pkSR, mess, Y) ]
+
+rule AS_Adversary_Receiver_Output: 
+[ AS_Receiver_Output(pk(skR), pkSR, mess, Y, pre_signature), In(skR) ] --[ Corrupt(pk(skR)) ]-> 
+[ Out(pre_signature) ]
+
+
+// SELLER 
+rule Setup: // SETUP WITNESS
+let beta = ~zeta
+    k  = h(beta)
+    c  = senc(wtn,k) 
+    rho = g^beta
+    pi = zk_prove(c,rho,wtn,beta) 
+in 
+  [ !Witn(wtn), Fr(~zeta) ]  
+--[ Setup(wtn) ]-> 
+  [ Out(<c,rho,pi>), State0( wtn, rho, beta) ]
+
+rule Exchange:
+  let //pkS = pk(~skS) 
+      trans = <sn,pkS,'notime'>
+      pub = <pkSR,trans,rho> 
+      priv = beta 
+  in
+    [ !Pk(pkS),!Pk(pkR), State0(wtn, rho, beta), !SharedPk(pkS + pkR,pkSR), !Coin(sn,pkSR,'time'), Fr(~r1) ] 
+  --[ Once(<'claim',sn>), Honest(pkS) ]-> 
+    [ AS_Sender_Input(pkS, pkSR, trans, beta), State1(pkS, pkSR, wtn, sn,beta,trans) ]
+
+
+rule Settle:
+  let sig = i(beta) XOR masked_signature
+  in 
+    [ State1(pkS, pkSR, wtn,sn,beta,trans), In(masked_signature) ] 
+  --[ Claim(pkS,wtn, sn), Eq(verify(sig,trans,pkSR),ok) ]-> 
+    [ Out( <trans,sig> ), State2(pkS,pkSR,wtn,sn) ] 
+
+// SECURITY PROPERTIES
+
+lemma Sender_Security_1:  
+  " All  wtn #i #j. Setup(wtn) @ i & !KU(wtn) @ j ==> Ex pkS #k sn. Claim(pkS, wtn, sn) @ k "
+
+lemma Sender_Security_2:
+" All pkX pkY wtnX wtnY sn #i #j. Claim(pkX, wtnX, sn) @ i & Claim(pkY, wtnY, sn) @ j ==> #i = #j "
+
+lemma Sender_Security_3:
+  " All pkS pkX wtn sn lab #i #j. Claim(pkS, wtn, sn) @ i & !Spend(sn,lab, pkX) @ j ==> pkS = pkX | lab = 'time' "
+
+lemma Sender_Security_3_xor_free_corrupt:
+  " All pkS pkX wtn sn lab #i #j #q. 
+    Claim(pkS, wtn, sn) @ i & !Spend(sn,lab, pkX) @ j & Corrupt(pkX) @ q ==> 
+    lab = 'time' "
+    
+lemma Sender_Security_3_xor_free_honest:
+  " All pkS pkX wtn sn lab #q #i #j. 
+    Claim(pkS, wtn, sn) @ i & !Spend(sn,lab, pkX) @ j & Honest(pkX) @ q  ==> 
+     pkS = pkX  | lab = 'time' "
+
+
+// REACHABILITY LEMMAS (TO CHECK THAT THE CODE IS RUNNING AS EXPECTED)
+lemma Sender_Reachability_1:
+ exists-trace
+ " Ex wtn #i #j. Setup(wtn) @ i & !KU(wtn) @ j  "
+
+lemma Sender_Reachability_2:
+ exists-trace
+ " Ex pks wtn sn #i #j #l. Setup(wtn) @ i & !KU(wtn) @ j & Claim(pks,wtn,sn) @ l"
+
+lemma Sender_Reachability_3:
+ exists-trace
+ " Ex pks wtn pkx sn x1 #i #j #l #m. Setup(wtn) @ i & !KU(wtn) @ j & Claim(pks,wtn,sn) @ l & 
+            !Spend(sn, x1, pkx) @ m " //& !Coin(x4, pks, 'notime') @ n "
+
+
+//lemma SecretKey:/* ---*/ 
+// LEMMA SecretKey IS PROVED INDIVIDUALLY; NEED TO COMMENT OTHER LEMMAS TO OBTAIN TERMINATION;
+// THEREFORE WE CAN USE A RESTRICTION INSTEAD FOR THE PROOF OF SECURITY AND REACHABILITY LEMMAS
+restriction SecretKey:
+  " All x #i. !Sk(x) @ i ==> not Ex #l. !KU(x) @ l " 
+
+// EQUALITY CHECKS
+restriction Equalities:
+  " (All x y #i. Eq(x,y) @ i ==> x = y ) "
+
+
+end

@@ -1,4 +1,4 @@
-//TIME: 1min58sec (security + reachability)
+//TIME: 2min5sec (security + reachability)
 
 theory ZKCP_Receiver
 
@@ -143,7 +143,7 @@ rule Exchange_1:
   [ State0( skR, pkS, pkSR, stm, c, rho, trans0, sn0, sig0), !Trans(sn0,pk(skR), sig0, sn, pkSR), 
     !Coin(sn,pkSR,'time') // RUNS FASTER WITH THIS LINE 
     ]
---[ Pay( pk(skR), stm, sn), PayC( pk(skR), rho, sn) ]->
+--[ Pay( pk(skR), stm, sn), PayC( pk(skR), rho, sn), Honest(pk(skR)) ]->
   [ AS_Receiver_Input(pk(skR), pkSR, trans, rho), State1(skR, pkS , pkSR, stm, c, rho,  sn, trans) ]
 
 rule Exchange_2:
